@@ -105,6 +105,15 @@ impl Chip8 {
             Instruction::SkipIfNotEqualReg { x, y } => {
                 self.skip_if(self.v[x as usize] != self.v[y as usize])
             }
+            Instruction::LoadReg { x, y } => self.v[x as usize] = self.v[y as usize],
+            Instruction::Or { x, y } => self.v[x as usize] |= self.v[y as usize],
+            Instruction::And { x, y } => self.v[x as usize] &= self.v[y as usize],
+            Instruction::Xor { x, y } => self.v[x as usize] ^= self.v[y as usize],
+            Instruction::AddReg { x, y } => self.add_reg(x, y),
+            Instruction::SubReg { x, y } => self.sub_reg(x, y),
+            Instruction::SubReverse { x, y } => self.sub_reverse(x, y),
+            Instruction::ShiftRight { x, .. } => self.shift_right(x),
+            Instruction::ShiftLeft { x, .. } => self.shift_left(x),
             _ => {}
         }
         Ok(())
@@ -162,6 +171,36 @@ impl Chip8 {
         if condition {
             self.pc += 2;
         }
+    }
+
+    fn add_reg(&mut self, x: u8, y: u8) {
+        let (result, carry) = self.v[x as usize].overflowing_add(self.v[y as usize]);
+        self.v[x as usize] = result;
+        self.v[0xF] = u8::from(carry);
+    }
+
+    fn sub_reg(&mut self, x: u8, y: u8) {
+        let (result, borrow) = self.v[x as usize].overflowing_sub(self.v[y as usize]);
+        self.v[x as usize] = result;
+        self.v[0xF] = u8::from(!borrow);
+    }
+
+    fn sub_reverse(&mut self, x: u8, y: u8) {
+        let (result, borrow) = self.v[y as usize].overflowing_sub(self.v[x as usize]);
+        self.v[x as usize] = result;
+        self.v[0xF] = u8::from(!borrow);
+    }
+
+    fn shift_right(&mut self, x: u8) {
+        let value = self.v[x as usize];
+        self.v[x as usize] = value >> 1;
+        self.v[0xF] = value & 1;
+    }
+
+    fn shift_left(&mut self, x: u8) {
+        let value = self.v[x as usize];
+        self.v[x as usize] = value << 1;
+        self.v[0xF] = value >> 7;
     }
 }
 
@@ -493,5 +532,137 @@ mod tests {
         chip.execute(Instruction::SkipIfNotEqualReg { x: 1, y: 3 })
             .unwrap();
         assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn load_reg_copies_value() {
+        let mut chip = Chip8::new();
+        chip.v[2] = 9;
+
+        chip.execute(Instruction::LoadReg { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[1], 9);
+    }
+
+    #[test]
+    fn logic_operations() {
+        let mut chip = Chip8::new();
+        chip.v[2] = 0b1010;
+
+        chip.v[1] = 0b1100;
+        chip.execute(Instruction::Or { x: 1, y: 2 }).unwrap();
+        assert_eq!(chip.v[1], 0b1110);
+
+        chip.v[1] = 0b1100;
+        chip.execute(Instruction::And { x: 1, y: 2 }).unwrap();
+        assert_eq!(chip.v[1], 0b1000);
+
+        chip.v[1] = 0b1100;
+        chip.execute(Instruction::Xor { x: 1, y: 2 }).unwrap();
+        assert_eq!(chip.v[1], 0b0110);
+    }
+
+    #[test]
+    fn add_reg_without_carry() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 10;
+        chip.v[2] = 20;
+
+        chip.execute(Instruction::AddReg { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[1], 30);
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn add_reg_sets_carry_and_wraps() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 200;
+        chip.v[2] = 100;
+
+        chip.execute(Instruction::AddReg { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[1], 44);
+        assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn sub_reg_without_borrow() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 10;
+        chip.v[2] = 3;
+
+        chip.execute(Instruction::SubReg { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[1], 7);
+        assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn sub_reg_with_borrow_wraps() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 3;
+        chip.v[2] = 10;
+
+        chip.execute(Instruction::SubReg { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[1], 249);
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn sub_reverse_computes_vy_minus_vx() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 3;
+        chip.v[2] = 10;
+
+        chip.execute(Instruction::SubReverse { x: 1, y: 2 })
+            .unwrap();
+
+        assert_eq!(chip.v[1], 7);
+        assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn shift_right_puts_dropped_bit_in_vf() {
+        let mut chip = Chip8::new();
+
+        chip.v[1] = 0b0000_0101;
+        chip.execute(Instruction::ShiftRight { x: 1, y: 0 })
+            .unwrap();
+        assert_eq!(chip.v[1], 0b0000_0010);
+        assert_eq!(chip.v[0xF], 1);
+
+        chip.v[1] = 0b0000_0100;
+        chip.execute(Instruction::ShiftRight { x: 1, y: 0 })
+            .unwrap();
+        assert_eq!(chip.v[1], 0b0000_0010);
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn shift_left_puts_dropped_bit_in_vf() {
+        let mut chip = Chip8::new();
+
+        chip.v[1] = 0b1000_0001;
+        chip.execute(Instruction::ShiftLeft { x: 1, y: 0 }).unwrap();
+        assert_eq!(chip.v[1], 0b0000_0010);
+        assert_eq!(chip.v[0xF], 1);
+
+        chip.v[1] = 0b0100_0000;
+        chip.execute(Instruction::ShiftLeft { x: 1, y: 0 }).unwrap();
+        assert_eq!(chip.v[1], 0b1000_0000);
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn flag_wins_when_x_is_vf() {
+        let mut chip = Chip8::new();
+        chip.v[0xF] = 200;
+        chip.v[1] = 100;
+
+        chip.execute(Instruction::AddReg { x: 0xF, y: 1 }).unwrap();
+
+        assert_eq!(chip.v[0xF], 1);
     }
 }
