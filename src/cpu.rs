@@ -28,6 +28,8 @@ const FONTSET: [u8; 80] = [
 #[derive(Debug, PartialEq)]
 pub enum Error {
     RomTooLarge { size: usize, max: usize },
+    StackOverflow,
+    StackUnderflow,
 }
 
 // chip 8 is a imaginary 1970s computer
@@ -82,7 +84,7 @@ impl Chip8 {
         (high << 8) | low
     }
 
-    pub fn execute(&mut self, instruction: Instruction) {
+    pub fn execute(&mut self, instruction: Instruction) -> Result<(), Error> {
         match instruction {
             Instruction::ClearScreen => self.display.fill(false),
             Instruction::Jump(address) => self.pc = address,
@@ -93,8 +95,11 @@ impl Chip8 {
             }
             Instruction::LoadI(address) => self.i = address,
             Instruction::Draw { x, y, n } => self.draw(x, y, n),
+            Instruction::Call(address) => self.call(address)?,
+            Instruction::Return => self.return_from_subroutine()?,
             _ => {}
         }
+        Ok(())
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
@@ -124,6 +129,25 @@ impl Chip8 {
                 }
             }
         }
+    }
+
+    fn call(&mut self, address: u16) -> Result<(), Error> {
+        if self.sp as usize >= self.stack.len() {
+            return Err(Error::StackOverflow);
+        }
+        self.stack[self.sp as usize] = self.pc;
+        self.sp += 1;
+        self.pc = address;
+        Ok(())
+    }
+
+    fn return_from_subroutine(&mut self) -> Result<(), Error> {
+        if self.sp == 0 {
+            return Err(Error::StackUnderflow);
+        }
+        self.sp -= 1;
+        self.pc = self.stack[self.sp as usize];
+        Ok(())
     }
 }
 
@@ -225,7 +249,7 @@ mod tests {
         chip.display[0] = true;
         chip.display[DISPLAY_WIDTH * DISPLAY_HEIGHT - 1] = true;
 
-        chip.execute(Instruction::ClearScreen);
+        chip.execute(Instruction::ClearScreen).unwrap();
 
         assert_eq!(chip.display, [false; DISPLAY_WIDTH * DISPLAY_HEIGHT]);
     }
@@ -233,14 +257,15 @@ mod tests {
     #[test]
     fn jump_sets_pc() {
         let mut chip = Chip8::new();
-        chip.execute(Instruction::Jump(0x234));
+        chip.execute(Instruction::Jump(0x234)).unwrap();
         assert_eq!(chip.pc, 0x234);
     }
 
     #[test]
     fn load_byte_sets_register() {
         let mut chip = Chip8::new();
-        chip.execute(Instruction::LoadByte { x: 0xA, nn: 0x2B });
+        chip.execute(Instruction::LoadByte { x: 0xA, nn: 0x2B })
+            .unwrap();
         assert_eq!(chip.v[0xA], 0x2B);
     }
 
@@ -248,7 +273,7 @@ mod tests {
     fn add_byte_adds_to_register() {
         let mut chip = Chip8::new();
         chip.v[3] = 5;
-        chip.execute(Instruction::AddByte { x: 3, nn: 7 });
+        chip.execute(Instruction::AddByte { x: 3, nn: 7 }).unwrap();
         assert_eq!(chip.v[3], 12);
     }
 
@@ -256,7 +281,7 @@ mod tests {
     fn add_byte_wraps_and_leaves_vf_alone() {
         let mut chip = Chip8::new();
         chip.v[1] = 250;
-        chip.execute(Instruction::AddByte { x: 1, nn: 10 });
+        chip.execute(Instruction::AddByte { x: 1, nn: 10 }).unwrap();
         assert_eq!(chip.v[1], 4);
         assert_eq!(chip.v[0xF], 0);
     }
@@ -264,7 +289,7 @@ mod tests {
     #[test]
     fn load_i_sets_index_register() {
         let mut chip = Chip8::new();
-        chip.execute(Instruction::LoadI(0x2F0));
+        chip.execute(Instruction::LoadI(0x2F0)).unwrap();
         assert_eq!(chip.i, 0x2F0);
     }
 
@@ -274,7 +299,8 @@ mod tests {
         chip.v[0] = 2;
         chip.v[1] = 3;
 
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 })
+            .unwrap();
 
         assert!(pixel_at(&chip, 2, 3));
         assert!(!pixel_at(&chip, 3, 3));
@@ -286,8 +312,10 @@ mod tests {
     fn drawing_twice_erases_and_sets_vf() {
         let mut chip = chip_with_sprite(&[0b1000_0000]);
 
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 })
+            .unwrap();
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 })
+            .unwrap();
 
         assert!(!pixel_at(&chip, 0, 0));
         assert_eq!(chip.v[0xF], 1);
@@ -299,7 +327,8 @@ mod tests {
         chip.v[0] = 60;
         chip.v[1] = 31;
 
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 2 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 2 })
+            .unwrap();
 
         assert!(pixel_at(&chip, 63, 31));
         assert!(!pixel_at(&chip, 0, 31));
@@ -311,7 +340,8 @@ mod tests {
         let mut chip = chip_with_sprite(&[0b1000_0000]);
         chip.v[0] = 69;
 
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 })
+            .unwrap();
 
         assert!(pixel_at(&chip, 5, 0));
     }
@@ -321,11 +351,73 @@ mod tests {
         let mut chip = Chip8::new();
         chip.i = 0x050;
 
-        chip.execute(Instruction::Draw { x: 0, y: 1, n: 5 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 5 })
+            .unwrap();
 
         assert!(pixel_at(&chip, 0, 0));
         assert!(!pixel_at(&chip, 4, 0));
         assert!(pixel_at(&chip, 3, 1));
         assert!(!pixel_at(&chip, 1, 1));
+    }
+
+    #[test]
+    fn call_saves_return_address_and_jumps() {
+        let mut chip = Chip8::new();
+        chip.pc = 0x202;
+
+        chip.execute(Instruction::Call(0x300)).unwrap();
+
+        assert_eq!(chip.pc, 0x300);
+        assert_eq!(chip.sp, 1);
+        assert_eq!(chip.stack[0], 0x202);
+    }
+
+    #[test]
+    fn return_goes_back_to_caller() {
+        let mut chip = Chip8::new();
+        chip.pc = 0x202;
+        chip.execute(Instruction::Call(0x300)).unwrap();
+
+        chip.execute(Instruction::Return).unwrap();
+
+        assert_eq!(chip.pc, 0x202);
+        assert_eq!(chip.sp, 0);
+    }
+
+    #[test]
+    fn nested_calls_unwind_in_order() {
+        let mut chip = Chip8::new();
+        chip.pc = 0x202;
+        chip.execute(Instruction::Call(0x300)).unwrap();
+        chip.pc = 0x302;
+        chip.execute(Instruction::Call(0x400)).unwrap();
+
+        chip.execute(Instruction::Return).unwrap();
+        assert_eq!(chip.pc, 0x302);
+        chip.execute(Instruction::Return).unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn call_fails_when_stack_is_full() {
+        let mut chip = Chip8::new();
+        for _ in 0..16 {
+            chip.execute(Instruction::Call(0x300)).unwrap();
+        }
+
+        assert_eq!(
+            chip.execute(Instruction::Call(0x300)),
+            Err(Error::StackOverflow)
+        );
+    }
+
+    #[test]
+    fn return_fails_on_empty_stack() {
+        let mut chip = Chip8::new();
+
+        assert_eq!(
+            chip.execute(Instruction::Return),
+            Err(Error::StackUnderflow)
+        );
     }
 }
