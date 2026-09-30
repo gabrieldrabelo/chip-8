@@ -1,9 +1,11 @@
 use chip8::cpu::{Chip8, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use chip8::quirks::Quirks;
+use clap::{Parser, ValueEnum};
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use rodio::source::{SineWave, Source};
 use rodio::{DeviceSinkBuilder, Player};
-use std::{env, fs};
+use std::path::PathBuf;
+use std::{fs, process};
 
 const FPS: u32 = 60;
 const DEFAULT_SPEED: u32 = 700;
@@ -33,6 +35,78 @@ const KEYMAP: [(Key, usize); 16] = [
 const BEEP_FREQUENCY_HZ: f32 = 440.0;
 const BEEP_VOLUME: f32 = 0.2;
 
+/// A CHIP-8 emulator.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// Path to the ROM file to run
+    rom: PathBuf,
+
+    /// CPU speed in instructions per second (Up/Down arrows change it while playing)
+    #[arg(
+        long,
+        default_value_t = DEFAULT_SPEED,
+        value_parser = clap::value_parser!(u32).range(MIN_SPEED as i64..=MAX_SPEED as i64)
+    )]
+    speed: u32,
+
+    /// Size of each CHIP-8 pixel on the screen
+    #[arg(long, value_enum, default_value_t = PixelScale::X16)]
+    scale: PixelScale,
+
+    /// Which set of CHIP-8 quirks to use
+    #[arg(long, value_enum, default_value_t = QuirksPreset::Modern)]
+    quirks: QuirksPreset,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum QuirksPreset {
+    Modern,
+    Original,
+}
+
+impl QuirksPreset {
+    fn quirks(self) -> Quirks {
+        match self {
+            QuirksPreset::Modern => Quirks::modern(),
+            QuirksPreset::Original => Quirks::original(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PixelScale {
+    #[value(name = "1")]
+    X1,
+    #[value(name = "2")]
+    X2,
+    #[value(name = "4")]
+    X4,
+    #[value(name = "8")]
+    X8,
+    #[value(name = "16")]
+    X16,
+    #[value(name = "32")]
+    X32,
+}
+
+impl PixelScale {
+    fn to_minifb(self) -> Scale {
+        match self {
+            PixelScale::X1 => Scale::X1,
+            PixelScale::X2 => Scale::X2,
+            PixelScale::X4 => Scale::X4,
+            PixelScale::X8 => Scale::X8,
+            PixelScale::X16 => Scale::X16,
+            PixelScale::X32 => Scale::X32,
+        }
+    }
+}
+
+fn window_title(speed: u32) -> String {
+    format!("CHIP-8 - {speed} instructions/s")
+}
+
 fn steps_for_frame(speed: u32, carry: &mut u32) -> u32 {
     *carry += speed;
     let steps = *carry / FPS;
@@ -51,29 +125,41 @@ fn adjusted_speed(window: &Window, speed: u32) -> u32 {
 }
 
 fn main() {
-    let path = env::args().nth(1).expect("usage: chip8 <rom-file>");
-    let rom = fs::read(&path).expect("could not read the ROM file");
+    if let Err(message) = run(Cli::parse()) {
+        eprintln!("error: {message}");
+        process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<(), String> {
+    let rom = fs::read(&cli.rom)
+        .map_err(|error| format!("could not read {}: {error}", cli.rom.display()))?;
 
     let mut chip = Chip8::new();
-    chip.quirks = match env::args().nth(2).as_deref() {
-        Some("original") => Quirks::original(),
-        _ => Quirks::modern(),
-    };
-    chip.load_rom(&rom).expect("ROM is too large");
+    chip.quirks = cli.quirks.quirks();
+    chip.load_rom(&rom)
+        .map_err(|error| format!("could not load the ROM: {error:?}"))?;
 
     let options = WindowOptions {
-        scale: Scale::X16,
+        scale: cli.scale.to_minifb(),
         ..WindowOptions::default()
     };
-    let mut window = Window::new("CHIP-8", DISPLAY_WIDTH, DISPLAY_HEIGHT, options)
-        .expect("could not create the window");
+    let mut window = Window::new(
+        &window_title(cli.speed),
+        DISPLAY_WIDTH,
+        DISPLAY_HEIGHT,
+        options,
+    )
+    .map_err(|error| format!("could not create the window: {error}"))?;
     window.set_target_fps(FPS as usize);
-    let audio = DeviceSinkBuilder::open_default_sink().expect("could not open the audio output");
+
+    let audio = DeviceSinkBuilder::open_default_sink()
+        .map_err(|error| format!("could not open the audio output: {error}"))?;
     let beep = Player::connect_new(audio.mixer());
     beep.append(SineWave::new(BEEP_FREQUENCY_HZ).amplify(BEEP_VOLUME));
     beep.pause();
 
-    let mut speed = DEFAULT_SPEED;
+    let mut speed = cli.speed;
     let mut carry = 0;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
@@ -81,7 +167,7 @@ fn main() {
 
         if new_speed != speed {
             speed = new_speed;
-            window.set_title(&format!("CHIP-8 - {speed} instructions/s"));
+            window.set_title(&window_title(speed));
         }
 
         for (key, index) in KEYMAP {
@@ -90,7 +176,8 @@ fn main() {
 
         let steps = steps_for_frame(speed, &mut carry);
         for _ in 0..steps {
-            chip.step().expect("instruction failed");
+            chip.step()
+                .map_err(|error| format!("instruction failed: {error:?}"))?;
         }
 
         if chip.sound_timer > 0 {
@@ -109,8 +196,10 @@ fn main() {
 
         window
             .update_with_buffer(&pixels, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-            .expect("could not update the window");
+            .map_err(|error| format!("could not update the window: {error}"))?;
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -131,5 +220,11 @@ mod tests {
             let steps = steps_for_frame(700, &mut carry);
             assert!(steps == 11 || steps == 12);
         }
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }
