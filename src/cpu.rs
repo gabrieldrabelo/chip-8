@@ -83,8 +83,16 @@ impl Chip8 {
     }
 
     pub fn execute(&mut self, instruction: Instruction) {
-        if let Instruction::ClearScreen = instruction {
-            self.display.fill(false);
+        match instruction {
+            Instruction::ClearScreen => self.display.fill(false),
+            Instruction::Jump(address) => self.pc = address,
+            Instruction::LoadByte { x, nn } => self.v[x as usize] = nn,
+            Instruction::AddByte { x, nn } => {
+                let x = x as usize;
+                self.v[x] = self.v[x].wrapping_add(nn);
+            }
+            Instruction::LoadI(address) => self.i = address,
+            _ => {}
         }
     }
 }
@@ -179,5 +187,43 @@ mod tests {
         chip.execute(Instruction::ClearScreen);
 
         assert_eq!(chip.display, [false; DISPLAY_WIDTH * DISPLAY_HEIGHT]);
+    }
+
+    #[test]
+    fn jump_sets_pc() {
+        let mut chip = Chip8::new();
+        chip.execute(Instruction::Jump(0x234));
+        assert_eq!(chip.pc, 0x234);
+    }
+
+    #[test]
+    fn load_byte_sets_register() {
+        let mut chip = Chip8::new();
+        chip.execute(Instruction::LoadByte { x: 0xA, nn: 0x2B });
+        assert_eq!(chip.v[0xA], 0x2B);
+    }
+
+    #[test]
+    fn add_byte_adds_to_register() {
+        let mut chip = Chip8::new();
+        chip.v[3] = 5;
+        chip.execute(Instruction::AddByte { x: 3, nn: 7 });
+        assert_eq!(chip.v[3], 12);
+    }
+
+    #[test]
+    fn add_byte_wraps_and_leaves_vf_alone() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 250;
+        chip.execute(Instruction::AddByte { x: 1, nn: 10 });
+        assert_eq!(chip.v[1], 4);
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn load_i_sets_index_register() {
+        let mut chip = Chip8::new();
+        chip.execute(Instruction::LoadI(0x2F0));
+        assert_eq!(chip.i, 0x2F0);
     }
 }
