@@ -1,4 +1,4 @@
-use crate::instruction::Instruction;
+use crate::instruction::{Instruction, decode};
 
 const PROGRAM_START: u16 = 0x200;
 const FONT_START: usize = 0x050;
@@ -85,6 +85,23 @@ impl Chip8 {
         self.pc += 2;
 
         (high << 8) | low
+    }
+
+    pub fn step(&mut self) -> Result<(), Error> {
+        let opcode = self.fetch();
+        let instruction = decode(opcode);
+        self.execute(instruction)
+    }
+
+    pub fn display_as_text(&self) -> String {
+        let mut text = String::new();
+        for row in self.display.chunks(DISPLAY_WIDTH) {
+            for &pixel in row {
+                text.push_str(if pixel { "██" } else { "  " });
+            }
+            text.push('\n');
+        }
+        text
     }
 
     pub fn execute(&mut self, instruction: Instruction) -> Result<(), Error> {
@@ -841,5 +858,28 @@ mod tests {
         chip.execute(Instruction::LoadRegs(0xF)).unwrap();
 
         assert_eq!(chip.v, original);
+    }
+
+    #[test]
+    fn step_fetches_decodes_and_executes() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0x6A, 0x2B, 0x7A, 0x01]).unwrap();
+
+        chip.step().unwrap();
+        chip.step().unwrap();
+
+        assert_eq!(chip.v[0xA], 0x2C);
+        assert_eq!(chip.pc, 0x204);
+    }
+
+    #[test]
+    fn display_as_text_renders_pixels() {
+        let mut chip = Chip8::new();
+        chip.display[1] = true;
+
+        let text = chip.display_as_text();
+
+        assert_eq!(text.lines().count(), DISPLAY_HEIGHT);
+        assert!(text.starts_with("  ██  "));
     }
 }
