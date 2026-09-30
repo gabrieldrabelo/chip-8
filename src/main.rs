@@ -47,6 +47,7 @@ fn main() {
         for _ in 0..STEPS_PER_FRAME {
             chip.step().expect("instruction failed");
         }
+        chip.tick_timers();
 
         let pixels: Vec<u32> = chip
             .display

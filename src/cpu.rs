@@ -44,6 +44,8 @@ pub struct Chip8 {
     pub display: [bool; DISPLAY_WIDTH * DISPLAY_HEIGHT],
     pub rng_state: u32,
     pub keys: [bool; 16],
+    pub delay_timer: u8,
+    pub sound_timer: u8,
 }
 
 impl Chip8 {
@@ -61,6 +63,8 @@ impl Chip8 {
             display: [false; DISPLAY_WIDTH * DISPLAY_HEIGHT],
             rng_state: RNG_SEED,
             keys: [false; 16],
+            delay_timer: 0,
+            sound_timer: 0,
         }
     }
 
@@ -93,6 +97,11 @@ impl Chip8 {
         let opcode = self.fetch();
         let instruction = decode(opcode);
         self.execute(instruction)
+    }
+
+    pub fn tick_timers(&mut self) {
+        self.delay_timer = self.delay_timer.saturating_sub(1);
+        self.sound_timer = self.sound_timer.saturating_sub(1);
     }
 
     pub fn display_as_text(&self) -> String {
@@ -146,6 +155,9 @@ impl Chip8 {
             Instruction::SkipIfKeyPressed(x) => self.skip_if(self.is_key_down(x)),
             Instruction::SkipIfKeyNotPressed(x) => self.skip_if(!self.is_key_down(x)),
             Instruction::WaitKey(x) => self.wait_key(x),
+            Instruction::LoadDelay(x) => self.v[x as usize] = self.delay_timer,
+            Instruction::SetDelay(x) => self.delay_timer = self.v[x as usize],
+            Instruction::SetSound(x) => self.sound_timer = self.v[x as usize],
             _ => {}
         }
         Ok(())
@@ -940,5 +952,57 @@ mod tests {
         chip.step().unwrap();
         assert_eq!(chip.v[3], 0xB);
         assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn set_and_load_delay_timer() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 30;
+
+        chip.execute(Instruction::SetDelay(1)).unwrap();
+        chip.execute(Instruction::LoadDelay(2)).unwrap();
+
+        assert_eq!(chip.delay_timer, 30);
+        assert_eq!(chip.v[2], 30);
+    }
+
+    #[test]
+    fn set_sound_timer() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 12;
+
+        chip.execute(Instruction::SetSound(1)).unwrap();
+
+        assert_eq!(chip.sound_timer, 12);
+    }
+
+    #[test]
+    fn tick_timers_counts_down_and_stops_at_zero() {
+        let mut chip = Chip8::new();
+        chip.delay_timer = 2;
+        chip.sound_timer = 1;
+
+        chip.tick_timers();
+        assert_eq!(chip.delay_timer, 1);
+        assert_eq!(chip.sound_timer, 0);
+
+        chip.tick_timers();
+        chip.tick_timers();
+        assert_eq!(chip.delay_timer, 0);
+        assert_eq!(chip.sound_timer, 0);
+    }
+
+    #[test]
+    fn sixty_ticks_equal_one_second_of_delay() {
+        let mut chip = Chip8::new();
+        chip.delay_timer = 60;
+
+        for _ in 0..59 {
+            chip.tick_timers();
+        }
+        assert_eq!(chip.delay_timer, 1);
+
+        chip.tick_timers();
+        assert_eq!(chip.delay_timer, 0);
     }
 }
