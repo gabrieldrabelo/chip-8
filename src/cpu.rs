@@ -4,6 +4,7 @@ const PROGRAM_START: u16 = 0x200;
 const FONT_START: usize = 0x050;
 pub const DISPLAY_WIDTH: usize = 64;
 pub const DISPLAY_HEIGHT: usize = 32;
+const RNG_SEED: u32 = 0x1234_5678;
 
 #[rustfmt::skip]
 const FONTSET: [u8; 80] = [
@@ -41,6 +42,7 @@ pub struct Chip8 {
     pub sp: u8, // stack pointer, how many items are on the stack now (so, we have the next free slot)
     pub stack: [u16; 16], // return addresses saved when calling a subroutine
     pub display: [bool; DISPLAY_WIDTH * DISPLAY_HEIGHT],
+    pub rng_state: u32,
 }
 
 impl Chip8 {
@@ -56,6 +58,7 @@ impl Chip8 {
             sp: 0,
             stack: [0; 16],
             display: [false; DISPLAY_WIDTH * DISPLAY_HEIGHT],
+            rng_state: RNG_SEED,
         }
     }
 
@@ -114,6 +117,8 @@ impl Chip8 {
             Instruction::SubReverse { x, y } => self.sub_reverse(x, y),
             Instruction::ShiftRight { x, .. } => self.shift_right(x),
             Instruction::ShiftLeft { x, .. } => self.shift_left(x),
+            Instruction::JumpV0(address) => self.pc = address + self.v[0] as u16,
+            Instruction::Random { x, nn } => self.v[x as usize] = self.next_random() & nn,
             _ => {}
         }
         Ok(())
@@ -201,6 +206,15 @@ impl Chip8 {
         let value = self.v[x as usize];
         self.v[x as usize] = value << 1;
         self.v[0xF] = value >> 7;
+    }
+
+    fn next_random(&mut self) -> u8 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng_state = x;
+        (x >> 24) as u8
     }
 }
 
@@ -664,5 +678,56 @@ mod tests {
         chip.execute(Instruction::AddReg { x: 0xF, y: 1 }).unwrap();
 
         assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn jump_v0_adds_v0_to_address() {
+        let mut chip = Chip8::new();
+        chip.v[0] = 5;
+
+        chip.execute(Instruction::JumpV0(0x300)).unwrap();
+
+        assert_eq!(chip.pc, 0x305);
+    }
+
+    #[test]
+    fn random_with_zero_mask_gives_zero() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 77;
+
+        chip.execute(Instruction::Random { x: 1, nn: 0x00 })
+            .unwrap();
+
+        assert_eq!(chip.v[1], 0);
+    }
+
+    #[test]
+    fn random_respects_the_mask() {
+        let mut chip = Chip8::new();
+
+        for _ in 0..100 {
+            chip.execute(Instruction::Random { x: 1, nn: 0x0F })
+                .unwrap();
+            assert_eq!(chip.v[1] & 0xF0, 0);
+        }
+    }
+
+    #[test]
+    fn random_is_not_constant() {
+        let mut chip = Chip8::new();
+        chip.execute(Instruction::Random { x: 1, nn: 0xFF })
+            .unwrap();
+        let first = chip.v[1];
+
+        let mut changed = false;
+        for _ in 0..100 {
+            chip.execute(Instruction::Random { x: 1, nn: 0xFF })
+                .unwrap();
+            if chip.v[1] != first {
+                changed = true;
+            }
+        }
+
+        assert!(changed);
     }
 }
