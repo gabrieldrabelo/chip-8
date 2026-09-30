@@ -43,6 +43,7 @@ pub struct Chip8 {
     pub stack: [u16; 16], // return addresses saved when calling a subroutine
     pub display: [bool; DISPLAY_WIDTH * DISPLAY_HEIGHT],
     pub rng_state: u32,
+    pub keys: [bool; 16],
 }
 
 impl Chip8 {
@@ -59,6 +60,7 @@ impl Chip8 {
             stack: [0; 16],
             display: [false; DISPLAY_WIDTH * DISPLAY_HEIGHT],
             rng_state: RNG_SEED,
+            keys: [false; 16],
         }
     }
 
@@ -141,6 +143,9 @@ impl Chip8 {
             Instruction::Bcd(x) => self.bcd(x),
             Instruction::StoreRegs(x) => self.store_regs(x),
             Instruction::LoadRegs(x) => self.load_regs(x),
+            Instruction::SkipIfKeyPressed(x) => self.skip_if(self.is_key_down(x)),
+            Instruction::SkipIfKeyNotPressed(x) => self.skip_if(!self.is_key_down(x)),
+            Instruction::WaitKey(x) => self.wait_key(x),
             _ => {}
         }
         Ok(())
@@ -262,6 +267,17 @@ impl Chip8 {
         let count = x as usize + 1;
         let start = self.i as usize;
         self.v[..count].copy_from_slice(&self.memory[start..start + count]);
+    }
+
+    fn is_key_down(&self, x: u8) -> bool {
+        self.keys[(self.v[x as usize] & 0xF) as usize]
+    }
+
+    fn wait_key(&mut self, x: u8) {
+        match self.keys.iter().position(|&pressed| pressed) {
+            Some(key) => self.v[x as usize] = key as u8,
+            None => self.pc -= 2,
+        }
     }
 }
 
@@ -881,5 +897,48 @@ mod tests {
 
         assert_eq!(text.lines().count(), DISPLAY_HEIGHT);
         assert!(text.starts_with("  ██  "));
+    }
+
+    #[test]
+    fn skip_if_key_pressed_uses_vx_as_key_number() {
+        let mut chip = Chip8::new();
+        chip.keys[5] = true;
+
+        chip.v[1] = 6;
+        chip.execute(Instruction::SkipIfKeyPressed(1)).unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.v[1] = 5;
+        chip.execute(Instruction::SkipIfKeyPressed(1)).unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn skip_if_key_not_pressed_is_the_opposite() {
+        let mut chip = Chip8::new();
+        chip.keys[5] = true;
+
+        chip.v[1] = 5;
+        chip.execute(Instruction::SkipIfKeyNotPressed(1)).unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.v[1] = 6;
+        chip.execute(Instruction::SkipIfKeyNotPressed(1)).unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn wait_key_blocks_until_a_key_is_pressed() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0xF3, 0x0A]).unwrap();
+
+        chip.step().unwrap();
+        chip.step().unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.keys[0xB] = true;
+        chip.step().unwrap();
+        assert_eq!(chip.v[3], 0xB);
+        assert_eq!(chip.pc, 0x202);
     }
 }
