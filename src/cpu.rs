@@ -21,6 +21,11 @@ const FONTSET: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
+#[derive(Debug, PartialEq)]
+pub enum Error {
+    RomTooLarge { size: usize, max: usize },
+}
+
 pub struct Chip8 {
     pub memory: [u8; 4096],
     pub v: [u8; 16],
@@ -43,6 +48,21 @@ impl Chip8 {
             sp: 0,
             stack: [0; 16],
         }
+    }
+
+    pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), Error> {
+        let start = PROGRAM_START as usize;
+        let max = self.memory.len() - start;
+
+        if rom.len() > max {
+            return Err(Error::RomTooLarge {
+                size: rom.len(),
+                max,
+            });
+        }
+
+        self.memory[start..start + rom.len()].copy_from_slice(rom);
+        Ok(())
     }
 }
 
@@ -73,5 +93,32 @@ mod tests {
         let chip = Chip8::new();
         assert_eq!(chip.memory[0x050], 0xF0);
         assert_eq!(chip.memory[0x050 + 79], 0x80);
+    }
+
+    #[test]
+    fn load_rom_copies_at_program_start() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0xA2, 0xF0]).unwrap();
+        assert_eq!(chip.memory[0x200], 0xA2);
+        assert_eq!(chip.memory[0x201], 0xF0);
+    }
+
+    #[test]
+    fn load_rom_accepts_max_size() {
+        let mut chip = Chip8::new();
+        assert!(chip.load_rom(&[1u8; 3584]).is_ok());
+    }
+
+    #[test]
+    fn load_rom_rejects_oversized_rom() {
+        let mut chip = Chip8::new();
+        let rom = [0u8; 3585];
+        assert_eq!(
+            chip.load_rom(&rom),
+            Err(Error::RomTooLarge {
+                size: 3585,
+                max: 3584
+            })
+        );
     }
 }
