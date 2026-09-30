@@ -119,6 +119,11 @@ impl Chip8 {
             Instruction::ShiftLeft { x, .. } => self.shift_left(x),
             Instruction::JumpV0(address) => self.pc = address + self.v[0] as u16,
             Instruction::Random { x, nn } => self.v[x as usize] = self.next_random() & nn,
+            Instruction::AddI(x) => self.i = self.i.wrapping_add(self.v[x as usize] as u16),
+            Instruction::LoadFont(x) => self.load_font(x),
+            Instruction::Bcd(x) => self.bcd(x),
+            Instruction::StoreRegs(x) => self.store_regs(x),
+            Instruction::LoadRegs(x) => self.load_regs(x),
             _ => {}
         }
         Ok(())
@@ -215,6 +220,31 @@ impl Chip8 {
         x ^= x << 5;
         self.rng_state = x;
         (x >> 24) as u8
+    }
+
+    fn load_font(&mut self, x: u8) {
+        let digit = u16::from(self.v[x as usize] & 0xF);
+        self.i = FONT_START as u16 + digit * 5;
+    }
+
+    fn bcd(&mut self, x: u8) {
+        let value = self.v[x as usize];
+        let start = self.i as usize;
+        self.memory[start] = value / 100;
+        self.memory[start + 1] = (value / 10) % 10;
+        self.memory[start + 2] = value % 10;
+    }
+
+    fn store_regs(&mut self, x: u8) {
+        let count = x as usize + 1;
+        let start = self.i as usize;
+        self.memory[start..start + count].copy_from_slice(&self.v[..count]);
+    }
+
+    fn load_regs(&mut self, x: u8) {
+        let count = x as usize + 1;
+        let start = self.i as usize;
+        self.v[..count].copy_from_slice(&self.memory[start..start + count]);
     }
 }
 
@@ -729,5 +759,87 @@ mod tests {
         }
 
         assert!(changed);
+    }
+
+    #[test]
+    fn add_i_adds_vx_to_index() {
+        let mut chip = Chip8::new();
+        chip.i = 0x300;
+        chip.v[1] = 5;
+
+        chip.execute(Instruction::AddI(1)).unwrap();
+
+        assert_eq!(chip.i, 0x305);
+    }
+
+    #[test]
+    fn load_font_points_index_at_digit_sprite() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 0xA;
+
+        chip.execute(Instruction::LoadFont(1)).unwrap();
+
+        assert_eq!(chip.i, 0x050 + 0xA * 5);
+        assert_eq!(chip.memory[chip.i as usize], 0xF0);
+        assert_eq!(chip.memory[chip.i as usize + 4], 0x90);
+    }
+
+    #[test]
+    fn bcd_splits_decimal_digits() {
+        let mut chip = Chip8::new();
+        chip.i = 0x300;
+
+        chip.v[2] = 156;
+        chip.execute(Instruction::Bcd(2)).unwrap();
+        assert_eq!(&chip.memory[0x300..0x303], &[1, 5, 6]);
+
+        chip.v[2] = 7;
+        chip.execute(Instruction::Bcd(2)).unwrap();
+        assert_eq!(&chip.memory[0x300..0x303], &[0, 0, 7]);
+    }
+
+    #[test]
+    fn store_regs_copies_v0_through_vx() {
+        let mut chip = Chip8::new();
+        chip.i = 0x300;
+        chip.v[0] = 1;
+        chip.v[1] = 2;
+        chip.v[2] = 3;
+        chip.v[3] = 4;
+
+        chip.execute(Instruction::StoreRegs(2)).unwrap();
+
+        assert_eq!(&chip.memory[0x300..0x303], &[1, 2, 3]);
+        assert_eq!(chip.memory[0x303], 0);
+        assert_eq!(chip.i, 0x300);
+    }
+
+    #[test]
+    fn load_regs_copies_memory_into_v0_through_vx() {
+        let mut chip = Chip8::new();
+        chip.i = 0x300;
+        chip.memory[0x300..0x303].copy_from_slice(&[9, 8, 7]);
+
+        chip.execute(Instruction::LoadRegs(1)).unwrap();
+
+        assert_eq!(chip.v[0], 9);
+        assert_eq!(chip.v[1], 8);
+        assert_eq!(chip.v[2], 0);
+    }
+
+    #[test]
+    fn store_then_load_regs_round_trips() {
+        let mut chip = Chip8::new();
+        chip.i = 0x300;
+        for n in 0..16 {
+            chip.v[n] = n as u8 * 3;
+        }
+        let original = chip.v;
+
+        chip.execute(Instruction::StoreRegs(0xF)).unwrap();
+        chip.v = [0; 16];
+        chip.execute(Instruction::LoadRegs(0xF)).unwrap();
+
+        assert_eq!(chip.v, original);
     }
 }
