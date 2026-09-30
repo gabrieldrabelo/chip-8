@@ -1,5 +1,7 @@
 use chip8::cpu::{Chip8, DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use minifb::{Key, Scale, Window, WindowOptions};
+use rodio::source::{SineWave, Source};
+use rodio::{DeviceSinkBuilder, Player};
 use std::{env, fs};
 
 const STEPS_PER_FRAME: usize = 12;
@@ -23,6 +25,8 @@ const KEYMAP: [(Key, usize); 16] = [
     (Key::C, 0xB),
     (Key::V, 0xF),
 ];
+const BEEP_FREQUENCY_HZ: f32 = 440.0;
+const BEEP_VOLUME: f32 = 0.2;
 
 fn main() {
     let path = env::args().nth(1).expect("usage: chip8 <rom-file>");
@@ -38,6 +42,10 @@ fn main() {
     let mut window = Window::new("CHIP-8", DISPLAY_WIDTH, DISPLAY_HEIGHT, options)
         .expect("could not create the window");
     window.set_target_fps(60);
+    let audio = DeviceSinkBuilder::open_default_sink().expect("could not open the audio output");
+    let beep = Player::connect_new(audio.mixer());
+    beep.append(SineWave::new(BEEP_FREQUENCY_HZ).amplify(BEEP_VOLUME));
+    beep.pause();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         for (key, index) in KEYMAP {
@@ -47,6 +55,13 @@ fn main() {
         for _ in 0..STEPS_PER_FRAME {
             chip.step().expect("instruction failed");
         }
+
+        if chip.sound_timer > 0 {
+            beep.play();
+        } else {
+            beep.pause();
+        }
+
         chip.tick_timers();
 
         let pixels: Vec<u32> = chip
