@@ -97,6 +97,14 @@ impl Chip8 {
             Instruction::Draw { x, y, n } => self.draw(x, y, n),
             Instruction::Call(address) => self.call(address)?,
             Instruction::Return => self.return_from_subroutine()?,
+            Instruction::SkipIfEqualByte { x, nn } => self.skip_if(self.v[x as usize] == nn),
+            Instruction::SkipIfNotEqualByte { x, nn } => self.skip_if(self.v[x as usize] != nn),
+            Instruction::SkipIfEqualReg { x, y } => {
+                self.skip_if(self.v[x as usize] == self.v[y as usize])
+            }
+            Instruction::SkipIfNotEqualReg { x, y } => {
+                self.skip_if(self.v[x as usize] != self.v[y as usize])
+            }
             _ => {}
         }
         Ok(())
@@ -148,6 +156,12 @@ impl Chip8 {
         self.sp -= 1;
         self.pc = self.stack[self.sp as usize];
         Ok(())
+    }
+
+    fn skip_if(&mut self, condition: bool) {
+        if condition {
+            self.pc += 2;
+        }
     }
 }
 
@@ -419,5 +433,65 @@ mod tests {
             chip.execute(Instruction::Return),
             Err(Error::StackUnderflow)
         );
+    }
+
+    #[test]
+    fn skip_if_equal_byte() {
+        let mut chip = Chip8::new();
+        chip.v[2] = 0x42;
+
+        chip.execute(Instruction::SkipIfEqualByte { x: 2, nn: 0x42 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x202);
+
+        chip.execute(Instruction::SkipIfEqualByte { x: 2, nn: 0x43 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn skip_if_not_equal_byte() {
+        let mut chip = Chip8::new();
+        chip.v[2] = 0x42;
+
+        chip.execute(Instruction::SkipIfNotEqualByte { x: 2, nn: 0x42 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.execute(Instruction::SkipIfNotEqualByte { x: 2, nn: 0x43 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn skip_if_equal_reg() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 7;
+        chip.v[2] = 7;
+        chip.v[3] = 8;
+
+        chip.execute(Instruction::SkipIfEqualReg { x: 1, y: 3 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.execute(Instruction::SkipIfEqualReg { x: 1, y: 2 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn skip_if_not_equal_reg() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 7;
+        chip.v[2] = 7;
+        chip.v[3] = 8;
+
+        chip.execute(Instruction::SkipIfNotEqualReg { x: 1, y: 2 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x200);
+
+        chip.execute(Instruction::SkipIfNotEqualReg { x: 1, y: 3 })
+            .unwrap();
+        assert_eq!(chip.pc, 0x202);
     }
 }
