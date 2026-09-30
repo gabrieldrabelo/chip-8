@@ -1,10 +1,14 @@
 use chip8::cpu::{Chip8, DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use minifb::{Key, Scale, Window, WindowOptions};
+use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use rodio::source::{SineWave, Source};
 use rodio::{DeviceSinkBuilder, Player};
 use std::{env, fs};
 
-const STEPS_PER_FRAME: usize = 12;
+const FPS: u32 = 60;
+const DEFAULT_SPEED: u32 = 700;
+const SPEED_STEP: u32 = 100;
+const MIN_SPEED: u32 = 100;
+const MAX_SPEED: u32 = 3000;
 const PIXEL_ON: u32 = 0x00FF_FFFF;
 const PIXEL_OFF: u32 = 0x0000_0000;
 const KEYMAP: [(Key, usize); 16] = [
@@ -28,6 +32,23 @@ const KEYMAP: [(Key, usize); 16] = [
 const BEEP_FREQUENCY_HZ: f32 = 440.0;
 const BEEP_VOLUME: f32 = 0.2;
 
+fn steps_for_frame(speed: u32, carry: &mut u32) -> u32 {
+    *carry += speed;
+    let steps = *carry / FPS;
+    *carry %= FPS;
+    steps
+}
+
+fn adjusted_speed(window: &Window, speed: u32) -> u32 {
+    if window.is_key_pressed(Key::Up, KeyRepeat::No) {
+        (speed + SPEED_STEP).min(MAX_SPEED)
+    } else if window.is_key_pressed(Key::Down, KeyRepeat::No) {
+        speed.saturating_sub(SPEED_STEP).max(MIN_SPEED)
+    } else {
+        speed
+    }
+}
+
 fn main() {
     let path = env::args().nth(1).expect("usage: chip8 <rom-file>");
     let rom = fs::read(&path).expect("could not read the ROM file");
@@ -41,18 +62,29 @@ fn main() {
     };
     let mut window = Window::new("CHIP-8", DISPLAY_WIDTH, DISPLAY_HEIGHT, options)
         .expect("could not create the window");
-    window.set_target_fps(60);
+    window.set_target_fps(FPS as usize);
     let audio = DeviceSinkBuilder::open_default_sink().expect("could not open the audio output");
     let beep = Player::connect_new(audio.mixer());
     beep.append(SineWave::new(BEEP_FREQUENCY_HZ).amplify(BEEP_VOLUME));
     beep.pause();
 
+    let mut speed = DEFAULT_SPEED;
+    let mut carry = 0;
+
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        let new_speed = adjusted_speed(&window, speed);
+
+        if new_speed != speed {
+            speed = new_speed;
+            window.set_title(&format!("CHIP-8 - {speed} instructions/s"));
+        }
+
         for (key, index) in KEYMAP {
             chip.keys[index] = window.is_key_down(key);
         }
 
-        for _ in 0..STEPS_PER_FRAME {
+        let steps = steps_for_frame(speed, &mut carry);
+        for _ in 0..steps {
             chip.step().expect("instruction failed");
         }
 
@@ -73,5 +105,26 @@ fn main() {
         window
             .update_with_buffer(&pixels, DISPLAY_WIDTH, DISPLAY_HEIGHT)
             .expect("could not update the window");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sixty_frames_run_exactly_one_second_of_instructions() {
+        let mut carry = 0;
+        let total: u32 = (0..60).map(|_| steps_for_frame(700, &mut carry)).sum();
+        assert_eq!(total, 700);
+    }
+
+    #[test]
+    fn each_frame_gets_a_whole_number_close_to_the_average() {
+        let mut carry = 0;
+        for _ in 0..60 {
+            let steps = steps_for_frame(700, &mut carry);
+            assert!(steps == 11 || steps == 12);
+        }
     }
 }
