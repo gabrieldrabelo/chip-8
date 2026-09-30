@@ -92,7 +92,37 @@ impl Chip8 {
                 self.v[x] = self.v[x].wrapping_add(nn);
             }
             Instruction::LoadI(address) => self.i = address,
+            Instruction::Draw { x, y, n } => self.draw(x, y, n),
             _ => {}
+        }
+    }
+
+    fn draw(&mut self, x: u8, y: u8, n: u8) {
+        let start_x = self.v[x as usize] as usize % DISPLAY_WIDTH;
+        let start_y = self.v[y as usize] as usize % DISPLAY_HEIGHT;
+        self.v[0xF] = 0;
+
+        for row in 0..n as usize {
+            let pixel_y = start_y + row;
+            if pixel_y >= DISPLAY_HEIGHT {
+                break;
+            }
+            let sprite_byte = self.memory[self.i as usize + row];
+
+            for col in 0..8 {
+                let pixel_x = start_x + col;
+                if pixel_x >= DISPLAY_WIDTH {
+                    break;
+                }
+                let sprite_pixel_on = ((sprite_byte >> (7 - col)) & 1) == 1;
+                if sprite_pixel_on {
+                    let index = pixel_y * DISPLAY_WIDTH + pixel_x;
+                    if self.display[index] {
+                        self.v[0xF] = 1;
+                    }
+                    self.display[index] ^= true;
+                }
+            }
         }
     }
 }
@@ -106,6 +136,17 @@ impl Default for Chip8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chip_with_sprite(sprite: &[u8]) -> Chip8 {
+        let mut chip = Chip8::new();
+        chip.memory[0x300..0x300 + sprite.len()].copy_from_slice(sprite);
+        chip.i = 0x300;
+        chip
+    }
+
+    fn pixel_at(chip: &Chip8, x: usize, y: usize) -> bool {
+        chip.display[y * DISPLAY_WIDTH + x]
+    }
 
     #[test]
     fn new_starts_at_program_start() {
@@ -225,5 +266,66 @@ mod tests {
         let mut chip = Chip8::new();
         chip.execute(Instruction::LoadI(0x2F0));
         assert_eq!(chip.i, 0x2F0);
+    }
+
+    #[test]
+    fn draw_lights_sprite_pixels() {
+        let mut chip = chip_with_sprite(&[0b1010_0000]);
+        chip.v[0] = 2;
+        chip.v[1] = 3;
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+
+        assert!(pixel_at(&chip, 2, 3));
+        assert!(!pixel_at(&chip, 3, 3));
+        assert!(pixel_at(&chip, 4, 3));
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn drawing_twice_erases_and_sets_vf() {
+        let mut chip = chip_with_sprite(&[0b1000_0000]);
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+
+        assert!(!pixel_at(&chip, 0, 0));
+        assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn draw_clips_at_screen_edges() {
+        let mut chip = chip_with_sprite(&[0xFF, 0xFF]);
+        chip.v[0] = 60;
+        chip.v[1] = 31;
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 2 });
+
+        assert!(pixel_at(&chip, 63, 31));
+        assert!(!pixel_at(&chip, 0, 31));
+        assert!(!pixel_at(&chip, 60, 0));
+    }
+
+    #[test]
+    fn draw_start_position_wraps() {
+        let mut chip = chip_with_sprite(&[0b1000_0000]);
+        chip.v[0] = 69;
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 });
+
+        assert!(pixel_at(&chip, 5, 0));
+    }
+
+    #[test]
+    fn draw_renders_font_digit_zero() {
+        let mut chip = Chip8::new();
+        chip.i = 0x050;
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 5 });
+
+        assert!(pixel_at(&chip, 0, 0));
+        assert!(!pixel_at(&chip, 4, 0));
+        assert!(pixel_at(&chip, 3, 1));
+        assert!(!pixel_at(&chip, 1, 1));
     }
 }
