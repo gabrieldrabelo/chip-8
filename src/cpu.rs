@@ -1,5 +1,9 @@
+use crate::instruction::Instruction;
+
 const PROGRAM_START: u16 = 0x200;
 const FONT_START: usize = 0x050;
+pub const DISPLAY_WIDTH: usize = 64;
+pub const DISPLAY_HEIGHT: usize = 32;
 
 #[rustfmt::skip]
 const FONTSET: [u8; 80] = [
@@ -34,6 +38,7 @@ pub struct Chip8 {
     pub pc: u16,            // program counter, holds the next instruction address
     pub sp: u8, // stack pointer, how many items are on the stack now (so, we have the next free slot)
     pub stack: [u16; 16], // return addresses saved when calling a subroutine
+    pub display: [bool; DISPLAY_WIDTH * DISPLAY_HEIGHT],
 }
 
 impl Chip8 {
@@ -48,6 +53,7 @@ impl Chip8 {
             pc: PROGRAM_START,
             sp: 0,
             stack: [0; 16],
+            display: [false; DISPLAY_WIDTH * DISPLAY_HEIGHT],
         }
     }
 
@@ -74,6 +80,12 @@ impl Chip8 {
         self.pc += 2;
 
         (high << 8) | low
+    }
+
+    pub fn execute(&mut self, instruction: Instruction) {
+        if let Instruction::ClearScreen = instruction {
+            self.display.fill(false);
+        }
     }
 }
 
@@ -150,5 +162,22 @@ mod tests {
         assert_eq!(chip.fetch(), 0xA2F0);
         assert_eq!(chip.fetch(), 0x00E0);
         assert_eq!(chip.pc, 0x204);
+    }
+
+    #[test]
+    fn new_starts_with_blank_display() {
+        let chip = Chip8::new();
+        assert_eq!(chip.display, [false; DISPLAY_WIDTH * DISPLAY_HEIGHT]);
+    }
+
+    #[test]
+    fn clear_screen_turns_all_pixels_off() {
+        let mut chip = Chip8::new();
+        chip.display[0] = true;
+        chip.display[DISPLAY_WIDTH * DISPLAY_HEIGHT - 1] = true;
+
+        chip.execute(Instruction::ClearScreen);
+
+        assert_eq!(chip.display, [false; DISPLAY_WIDTH * DISPLAY_HEIGHT]);
     }
 }
