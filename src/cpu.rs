@@ -1,4 +1,5 @@
 use crate::instruction::{Instruction, decode};
+use crate::quirks::Quirks;
 
 const PROGRAM_START: u16 = 0x200;
 const FONT_START: usize = 0x050;
@@ -46,6 +47,8 @@ pub struct Chip8 {
     pub keys: [bool; 16],
     pub delay_timer: u8,
     pub sound_timer: u8,
+    pub quirks: Quirks,
+    vblank: bool,
 }
 
 impl Chip8 {
@@ -65,6 +68,8 @@ impl Chip8 {
             keys: [false; 16],
             delay_timer: 0,
             sound_timer: 0,
+            quirks: Quirks::modern(),
+            vblank: false,
         }
     }
 
@@ -102,6 +107,7 @@ impl Chip8 {
     pub fn tick_timers(&mut self) {
         self.delay_timer = self.delay_timer.saturating_sub(1);
         self.sound_timer = self.sound_timer.saturating_sub(1);
+        self.vblank = true;
     }
 
     pub fn display_as_text(&self) -> String {
@@ -137,15 +143,24 @@ impl Chip8 {
                 self.skip_if(self.v[x as usize] != self.v[y as usize])
             }
             Instruction::LoadReg { x, y } => self.v[x as usize] = self.v[y as usize],
-            Instruction::Or { x, y } => self.v[x as usize] |= self.v[y as usize],
-            Instruction::And { x, y } => self.v[x as usize] &= self.v[y as usize],
-            Instruction::Xor { x, y } => self.v[x as usize] ^= self.v[y as usize],
+            Instruction::Or { x, y } => {
+                self.v[x as usize] |= self.v[y as usize];
+                self.reset_vf_quirk();
+            }
+            Instruction::And { x, y } => {
+                self.v[x as usize] &= self.v[y as usize];
+                self.reset_vf_quirk();
+            }
+            Instruction::Xor { x, y } => {
+                self.v[x as usize] ^= self.v[y as usize];
+                self.reset_vf_quirk();
+            }
             Instruction::AddReg { x, y } => self.add_reg(x, y),
             Instruction::SubReg { x, y } => self.sub_reg(x, y),
             Instruction::SubReverse { x, y } => self.sub_reverse(x, y),
-            Instruction::ShiftRight { x, .. } => self.shift_right(x),
-            Instruction::ShiftLeft { x, .. } => self.shift_left(x),
-            Instruction::JumpV0(address) => self.pc = address + self.v[0] as u16,
+            Instruction::ShiftRight { x, y } => self.shift_right(x, y),
+            Instruction::ShiftLeft { x, y } => self.shift_left(x, y),
+            Instruction::JumpV0(address) => self.jump_with_offset(address),
             Instruction::Random { x, nn } => self.v[x as usize] = self.next_random() & nn,
             Instruction::AddI(x) => self.i = self.i.wrapping_add(self.v[x as usize] as u16),
             Instruction::LoadFont(x) => self.load_font(x),
@@ -164,21 +179,35 @@ impl Chip8 {
     }
 
     fn draw(&mut self, x: u8, y: u8, n: u8) {
+        if self.quirks.display_wait {
+            if !self.vblank {
+                self.pc -= 2;
+                return;
+            }
+            self.vblank = false;
+        }
+
         let start_x = self.v[x as usize] as usize % DISPLAY_WIDTH;
         let start_y = self.v[y as usize] as usize % DISPLAY_HEIGHT;
         self.v[0xF] = 0;
 
         for row in 0..n as usize {
-            let pixel_y = start_y + row;
+            let mut pixel_y = start_y + row;
             if pixel_y >= DISPLAY_HEIGHT {
-                break;
+                if self.quirks.clipping {
+                    break;
+                }
+                pixel_y %= DISPLAY_HEIGHT;
             }
             let sprite_byte = self.memory[self.i as usize + row];
 
             for col in 0..8 {
-                let pixel_x = start_x + col;
+                let mut pixel_x = start_x + col;
                 if pixel_x >= DISPLAY_WIDTH {
-                    break;
+                    if self.quirks.clipping {
+                        break;
+                    }
+                    pixel_x %= DISPLAY_WIDTH;
                 }
                 let sprite_pixel_on = ((sprite_byte >> (7 - col)) & 1) == 1;
                 if sprite_pixel_on {
@@ -235,14 +264,14 @@ impl Chip8 {
         self.v[0xF] = u8::from(!borrow);
     }
 
-    fn shift_right(&mut self, x: u8) {
-        let value = self.v[x as usize];
+    fn shift_right(&mut self, x: u8, y: u8) {
+        let value = self.shift_source(x, y);
         self.v[x as usize] = value >> 1;
         self.v[0xF] = value & 1;
     }
 
-    fn shift_left(&mut self, x: u8) {
-        let value = self.v[x as usize];
+    fn shift_left(&mut self, x: u8, y: u8) {
+        let value = self.shift_source(x, y);
         self.v[x as usize] = value << 1;
         self.v[0xF] = value >> 7;
     }
@@ -273,12 +302,14 @@ impl Chip8 {
         let count = x as usize + 1;
         let start = self.i as usize;
         self.memory[start..start + count].copy_from_slice(&self.v[..count]);
+        self.advance_i_quirk(count);
     }
 
     fn load_regs(&mut self, x: u8) {
         let count = x as usize + 1;
         let start = self.i as usize;
         self.v[..count].copy_from_slice(&self.memory[start..start + count]);
+        self.advance_i_quirk(count);
     }
 
     fn is_key_down(&self, x: u8) -> bool {
@@ -289,6 +320,35 @@ impl Chip8 {
         match self.keys.iter().position(|&pressed| pressed) {
             Some(key) => self.v[x as usize] = key as u8,
             None => self.pc -= 2,
+        }
+    }
+
+    fn jump_with_offset(&mut self, address: u16) {
+        let register = if self.quirks.jump_uses_vx {
+            (address >> 8) as usize
+        } else {
+            0
+        };
+        self.pc = address + self.v[register] as u16;
+    }
+
+    fn advance_i_quirk(&mut self, count: usize) {
+        if self.quirks.memory_increments_i {
+            self.i += count as u16;
+        }
+    }
+
+    fn reset_vf_quirk(&mut self) {
+        if self.quirks.vf_reset {
+            self.v[0xF] = 0;
+        }
+    }
+
+    fn shift_source(&self, x: u8, y: u8) -> u8 {
+        if self.quirks.shift_uses_vy {
+            self.v[y as usize]
+        } else {
+            self.v[x as usize]
         }
     }
 }
@@ -1004,5 +1064,99 @@ mod tests {
 
         chip.tick_timers();
         assert_eq!(chip.delay_timer, 0);
+    }
+
+    #[test]
+    fn logic_ops_leave_vf_alone_by_default() {
+        let mut chip = Chip8::new();
+        chip.v[0xF] = 1;
+
+        chip.execute(Instruction::Or { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[0xF], 1);
+    }
+
+    #[test]
+    fn vf_reset_quirk_clears_vf_after_logic_ops() {
+        let mut chip = Chip8::new();
+        chip.quirks.vf_reset = true;
+        chip.v[0xF] = 1;
+
+        chip.execute(Instruction::Xor { x: 1, y: 2 }).unwrap();
+
+        assert_eq!(chip.v[0xF], 0);
+    }
+
+    #[test]
+    fn shift_reads_vx_by_default_and_vy_with_quirk() {
+        let mut chip = Chip8::new();
+        chip.v[1] = 8;
+        chip.v[2] = 4;
+
+        chip.execute(Instruction::ShiftRight { x: 1, y: 2 })
+            .unwrap();
+        assert_eq!(chip.v[1], 4);
+
+        chip.quirks.shift_uses_vy = true;
+        chip.v[1] = 8;
+        chip.execute(Instruction::ShiftRight { x: 1, y: 2 })
+            .unwrap();
+        assert_eq!(chip.v[1], 2);
+    }
+
+    #[test]
+    fn memory_quirk_advances_index_register() {
+        let mut chip = Chip8::new();
+        chip.quirks.memory_increments_i = true;
+        chip.i = 0x300;
+
+        chip.execute(Instruction::StoreRegs(2)).unwrap();
+
+        assert_eq!(chip.i, 0x303);
+    }
+
+    #[test]
+    fn jump_uses_v0_by_default_and_vx_with_quirk() {
+        let mut chip = Chip8::new();
+        chip.v[0] = 1;
+        chip.v[3] = 5;
+
+        chip.execute(Instruction::JumpV0(0x300)).unwrap();
+        assert_eq!(chip.pc, 0x301);
+
+        chip.quirks.jump_uses_vx = true;
+        chip.execute(Instruction::JumpV0(0x300)).unwrap();
+        assert_eq!(chip.pc, 0x305);
+    }
+
+    #[test]
+    fn draw_wraps_around_when_clipping_is_off() {
+        let mut chip = chip_with_sprite(&[0xFF]);
+        chip.quirks.clipping = false;
+        chip.v[0] = 60;
+
+        chip.execute(Instruction::Draw { x: 0, y: 1, n: 1 })
+            .unwrap();
+
+        assert!(pixel_at(&chip, 63, 0));
+        assert!(pixel_at(&chip, 0, 0));
+        assert!(pixel_at(&chip, 3, 0));
+        assert!(!pixel_at(&chip, 4, 0));
+    }
+
+    #[test]
+    fn display_wait_delays_draw_until_next_frame() {
+        let mut chip = chip_with_sprite(&[0x80]);
+        chip.quirks.display_wait = true;
+        chip.load_rom(&[0xD0, 0x11]).unwrap();
+
+        chip.step().unwrap();
+        assert!(!pixel_at(&chip, 0, 0));
+        assert_eq!(chip.pc, 0x200);
+
+        chip.tick_timers();
+        chip.step().unwrap();
+        assert!(pixel_at(&chip, 0, 0));
+        assert_eq!(chip.pc, 0x202);
     }
 }

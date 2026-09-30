@@ -1,4 +1,5 @@
 use chip8::cpu::{Chip8, DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use chip8::quirks::Quirks;
 use minifb::{Key, KeyRepeat, Scale, Window, WindowOptions};
 use rodio::source::{SineWave, Source};
 use rodio::{DeviceSinkBuilder, Player};
@@ -54,6 +55,10 @@ fn main() {
     let rom = fs::read(&path).expect("could not read the ROM file");
 
     let mut chip = Chip8::new();
+    chip.quirks = match env::args().nth(2).as_deref() {
+        Some("original") => Quirks::original(),
+        _ => Quirks::modern(),
+    };
     chip.load_rom(&rom).expect("ROM is too large");
 
     let options = WindowOptions {
