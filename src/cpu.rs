@@ -26,13 +26,14 @@ pub enum Error {
     RomTooLarge { size: usize, max: usize },
 }
 
+// chip 8 is a imaginary 1970s computer
 pub struct Chip8 {
-    pub memory: [u8; 4096],
-    pub v: [u8; 16],
-    pub i: u16,
-    pub pc: u16,
-    pub sp: u8,
-    pub stack: [u16; 16],
+    pub memory: [u8; 4096], // ram (row of byte-sized boxes)
+    pub v: [u8; 16],        // general-purpose register (V0 - VF) 1 byte each
+    pub i: u16,             // index register (holds a memory address)
+    pub pc: u16,            // program counter, holds the next instruction address
+    pub sp: u8, // stack pointer, how many items are on the stack now (so, we have the next free slot)
+    pub stack: [u16; 16], // return addresses saved when calling a subroutine
 }
 
 impl Chip8 {
@@ -63,6 +64,16 @@ impl Chip8 {
 
         self.memory[start..start + rom.len()].copy_from_slice(rom);
         Ok(())
+    }
+
+    pub fn fetch(&mut self) -> u16 {
+        let pc = self.pc as usize;
+        let high = self.memory[pc] as u16;
+        let low = self.memory[pc + 1] as u16;
+
+        self.pc += 2;
+
+        (high << 8) | low
     }
 }
 
@@ -120,5 +131,24 @@ mod tests {
                 max: 3584
             })
         );
+    }
+
+    #[test]
+    fn fetch_reads_big_endian_opcode_and_advances_pc() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0xA2, 0xF0]).unwrap();
+
+        assert_eq!(chip.fetch(), 0xA2F0);
+        assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn fetch_reads_consecutive_opcodes() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0xA2, 0xF0, 0x00, 0xE0]).unwrap();
+
+        assert_eq!(chip.fetch(), 0xA2F0);
+        assert_eq!(chip.fetch(), 0x00E0);
+        assert_eq!(chip.pc, 0x204);
     }
 }
