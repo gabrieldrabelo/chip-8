@@ -88,14 +88,41 @@ impl Chip8 {
         Ok(())
     }
 
-    pub fn fetch(&mut self) -> u16 {
+    fn peek_opcode(&self) -> u16 {
         let pc = self.pc as usize;
         let high = self.memory[pc] as u16;
         let low = self.memory[pc + 1] as u16;
 
-        self.pc += 2;
-
         (high << 8) | low
+    }
+
+    pub fn fetch(&mut self) -> u16 {
+        let opcode = self.peek_opcode();
+        self.pc += 2;
+        opcode
+    }
+
+    pub fn debug_state(&self) -> String {
+        let opcode = self.peek_opcode();
+        let registers: Vec<String> = self
+            .v
+            .iter()
+            .enumerate()
+            .map(|(index, value)| format!("V{index:X}={value:02X}"))
+            .collect();
+
+        format!(
+            "pc={:04X} op={:04X} {:X?}\ni={:04X} sp={} delay={} sound={}\n{}\nstack={:X?}",
+            self.pc,
+            opcode,
+            decode(opcode),
+            self.i,
+            self.sp,
+            self.delay_timer,
+            self.sound_timer,
+            registers.join(" "),
+            &self.stack[..self.sp as usize],
+        )
     }
 
     pub fn step(&mut self) -> Result<(), Error> {
@@ -1158,5 +1185,30 @@ mod tests {
         chip.step().unwrap();
         assert!(pixel_at(&chip, 0, 0));
         assert_eq!(chip.pc, 0x202);
+    }
+
+    #[test]
+    fn debug_state_shows_next_instruction_and_registers() {
+        let mut chip = Chip8::new();
+        chip.load_rom(&[0x6A, 0x2B, 0x12, 0x00]).unwrap();
+        chip.step().unwrap();
+
+        let state = chip.debug_state();
+
+        assert!(state.contains("pc=0202 op=1200"));
+        assert!(state.contains("VA=2B"));
+        assert!(state.contains("stack=[]"));
+    }
+
+    #[test]
+    fn debug_state_shows_only_the_used_part_of_the_stack() {
+        let mut chip = Chip8::new();
+        chip.pc = 0x202;
+        chip.execute(Instruction::Call(0x300)).unwrap();
+
+        let state = chip.debug_state();
+
+        assert!(state.contains("stack=[202]"));
+        assert!(state.contains("sp=1"));
     }
 }

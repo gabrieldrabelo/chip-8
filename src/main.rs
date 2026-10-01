@@ -57,6 +57,10 @@ struct Cli {
     /// Which set of CHIP-8 quirks to use
     #[arg(long, value_enum, default_value_t = QuirksPreset::Modern)]
     quirks: QuirksPreset,
+
+    /// Pause when the program counter reaches this address, in hex (repeatable)
+    #[arg(long = "break", value_name = "ADDRESS", value_parser = parse_address)]
+    breakpoints: Vec<u16>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -103,8 +107,18 @@ impl PixelScale {
     }
 }
 
-fn window_title(speed: u32) -> String {
-    format!("CHIP-8 - {speed} instructions/s")
+fn parse_address(text: &str) -> Result<u16, String> {
+    let digits = text.trim_start_matches("0x");
+    let address = u16::from_str_radix(digits, 16).map_err(|error| error.to_string())?;
+    if address > 0xFFF {
+        return Err(String::from("the address must be at most 0xFFF"));
+    }
+    Ok(address)
+}
+
+fn window_title(speed: u32, paused: bool) -> String {
+    let suffix = if paused { " [paused]" } else { "" };
+    format!("CHIP-8 - {speed} instructions/s{suffix}")
 }
 
 fn steps_for_frame(speed: u32, carry: &mut u32) -> u32 {
@@ -145,7 +159,7 @@ fn run(cli: Cli) -> Result<(), String> {
         ..WindowOptions::default()
     };
     let mut window = Window::new(
-        &window_title(cli.speed),
+        &window_title(cli.speed, false),
         DISPLAY_WIDTH,
         DISPLAY_HEIGHT,
         options,
@@ -160,33 +174,59 @@ fn run(cli: Cli) -> Result<(), String> {
     beep.pause();
 
     let mut speed = cli.speed;
+    let mut paused = false;
     let mut carry = 0;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
         let new_speed = adjusted_speed(&window, speed);
 
-        if new_speed != speed {
+        let pause_toggled = window.is_key_pressed(Key::Space, KeyRepeat::No);
+
+        if new_speed != speed || pause_toggled {
             speed = new_speed;
-            window.set_title(&window_title(speed));
+            paused ^= pause_toggled;
+            window.set_title(&window_title(speed, paused));
+        }
+
+        if pause_toggled && paused {
+            println!("{}\n", chip.debug_state());
         }
 
         for (key, index) in KEYMAP {
             chip.keys[index] = window.is_key_down(key);
         }
 
-        let steps = steps_for_frame(speed, &mut carry);
+        let steps = if !paused {
+            steps_for_frame(speed, &mut carry)
+        } else if window.is_key_pressed(Key::N, KeyRepeat::No) {
+            1
+        } else {
+            0
+        };
+
         for _ in 0..steps {
             chip.step()
                 .map_err(|error| format!("instruction failed: {error:?}"))?;
+
+            if paused {
+                println!("{}\n", chip.debug_state());
+            } else if cli.breakpoints.contains(&chip.pc) {
+                paused = true;
+                window.set_title(&window_title(speed, paused));
+                println!("breakpoint at {:#05X}\n{}\n", chip.pc, chip.debug_state());
+                break;
+            }
         }
 
-        if chip.sound_timer > 0 {
+        if chip.sound_timer > 0 && !paused {
             beep.play();
         } else {
             beep.pause();
         }
 
-        chip.tick_timers();
+        if !paused {
+            chip.tick_timers();
+        }
 
         let pixels: Vec<u32> = chip
             .display
@@ -226,5 +266,17 @@ mod tests {
     fn cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn parse_address_accepts_hex_with_or_without_prefix() {
+        assert_eq!(parse_address("0x2A4"), Ok(0x2A4));
+        assert_eq!(parse_address("2A4"), Ok(0x2A4));
+    }
+
+    #[test]
+    fn parse_address_rejects_invalid_input() {
+        assert!(parse_address("zzz").is_err());
+        assert!(parse_address("0x1000").is_err());
     }
 }
