@@ -1,3 +1,10 @@
+//! The CHIP-8 instruction set and the decoder that recognises it.
+
+/// One CHIP-8 instruction, already split into its arguments.
+///
+/// In the arguments, `x` and `y` are register numbers, `n` is a 4-bit number,
+/// `nn` is a byte and `nnn` (the `u16` ones) is a 12-bit address.
+/// The comment next to each variant shows the opcode it comes from.
 #[derive(Debug, PartialEq)]
 pub enum Instruction {
     ClearScreen,                          // 00E0
@@ -37,6 +44,15 @@ pub enum Instruction {
     Unknown(u16),                         // qualquer outro opcode
 }
 
+/// Recognises an opcode and splits it into an [`Instruction`].
+///
+/// An opcode that matches nothing becomes [`Instruction::Unknown`].
+///
+/// ```
+/// use chip8::instruction::{decode, Instruction};
+///
+/// assert_eq!(decode(0x1234), Instruction::Jump(0x234));
+/// ```
 pub fn decode(opcode: u16) -> Instruction {
     let nibbles = (
         ((opcode >> 12) & 0xF) as u8,

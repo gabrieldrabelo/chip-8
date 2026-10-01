@@ -152,7 +152,7 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut chip = Chip8::new();
     chip.quirks = cli.quirks.quirks();
     chip.load_rom(&rom)
-        .map_err(|error| format!("could not load the ROM: {error:?}"))?;
+        .map_err(|error| format!("could not load the ROM: {error}"))?;
 
     let options = WindowOptions {
         scale: cli.scale.to_minifb(),
@@ -206,7 +206,7 @@ fn run(cli: Cli) -> Result<(), String> {
 
         for _ in 0..steps {
             chip.step()
-                .map_err(|error| format!("instruction failed: {error:?}"))?;
+                .map_err(|error| format!("instruction failed: {error}"))?;
 
             if paused {
                 println!("{}\n", chip.debug_state());

@@ -1,9 +1,12 @@
 use crate::instruction::{Instruction, decode};
 use crate::quirks::Quirks;
+use std::fmt;
 
 const PROGRAM_START: u16 = 0x200;
 const FONT_START: usize = 0x050;
+/// The width of the screen, in pixels.
 pub const DISPLAY_WIDTH: usize = 64;
+/// The height of the screen, in pixels.
 pub const DISPLAY_HEIGHT: usize = 32;
 const RNG_SEED: u32 = 0x1234_5678;
 
@@ -27,31 +30,72 @@ const FONTSET: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
+/// Everything that can go wrong while running a program.
 #[derive(Debug, PartialEq)]
 pub enum Error {
+    /// The ROM is bigger than the memory available after the reserved area.
     RomTooLarge { size: usize, max: usize },
+    /// A subroutine call needed more than the 16 slots of the stack.
     StackOverflow,
+    /// A `Return` ran while the stack was empty.
     StackUnderflow,
+    /// A read or write went past the end of the 4 KB memory.
+    MemoryOutOfBounds { address: usize },
 }
 
-// chip 8 is a imaginary 1970s computer
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::RomTooLarge { size, max } => {
+                write!(f, "the ROM has {size} bytes but only {max} fit in memory")
+            }
+            Error::StackOverflow => write!(f, "stack overflow: more than 16 nested calls"),
+            Error::StackUnderflow => write!(f, "stack underflow: return without a call"),
+            Error::MemoryOutOfBounds { address } => {
+                write!(f, "memory access out of bounds at {address:#05X}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// The state of a CHIP-8 machine: memory, registers, stack, screen and timers.
+///
+/// CHIP-8 is an imaginary computer from the 1970s, made to make simple games
+/// easy to write. This type is the whole machine; call [`Chip8::step`] to run
+/// one instruction.
 pub struct Chip8 {
-    pub memory: [u8; 4096], // ram (row of byte-sized boxes)
-    pub v: [u8; 16],        // general-purpose register (V0 - VF) 1 byte each
-    pub i: u16,             // index register (holds a memory address)
-    pub pc: u16,            // program counter, holds the next instruction address
-    pub sp: u8, // stack pointer, how many items are on the stack now (so, we have the next free slot)
-    pub stack: [u16; 16], // return addresses saved when calling a subroutine
+    /// The RAM: 4096 bytes. Programs start at `0x200`.
+    pub memory: [u8; 4096],
+    /// The general-purpose registers `V0` to `VF`. `VF` doubles as a flag.
+    pub v: [u8; 16],
+    /// The index register, which holds a memory address.
+    pub i: u16,
+    /// The program counter: the address of the next instruction.
+    pub pc: u16,
+    /// The stack pointer: how many items are on the stack (the next free slot).
+    pub sp: u8,
+    /// Return addresses saved when calling a subroutine.
+    pub stack: [u16; 16],
+    /// The screen, one `bool` per pixel, row after row (`y * 64 + x`).
     pub display: [bool; DISPLAY_WIDTH * DISPLAY_HEIGHT],
+    /// The state of the random number generator behind `CXNN`.
     pub rng_state: u32,
+    /// Which of the 16 hex keys are pressed right now.
     pub keys: [bool; 16],
+    /// The delay timer, counting down at 60 Hz.
     pub delay_timer: u8,
+    /// The sound timer: a beep plays while it is above zero.
     pub sound_timer: u8,
+    /// Which quirks (differences between CHIP-8 versions) are active.
     pub quirks: Quirks,
     vblank: bool,
 }
 
 impl Chip8 {
+    /// Creates a machine with the fontset loaded, the program counter at `0x200`
+    /// and the [`Quirks::modern`] behaviour.
     pub fn new() -> Self {
         let mut memory = [0; 4096];
         memory[FONT_START..FONT_START + FONTSET.len()].copy_from_slice(&FONTSET);
@@ -73,6 +117,19 @@ impl Chip8 {
         }
     }
 
+    /// Copies a ROM into memory, starting at `0x200`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RomTooLarge`] if the ROM does not fit in the memory after `0x200`.
+    ///
+    /// ```
+    /// use chip8::cpu::{Chip8, Error};
+    ///
+    /// let mut chip = Chip8::new();
+    /// assert!(chip.load_rom(&[0xA2, 0xF0]).is_ok());
+    /// assert!(matches!(chip.load_rom(&[0; 5000]), Err(Error::RomTooLarge { .. })));
+    /// ```
     pub fn load_rom(&mut self, rom: &[u8]) -> Result<(), Error> {
         let start = PROGRAM_START as usize;
         let max = self.memory.len() - start;
@@ -88,22 +145,41 @@ impl Chip8 {
         Ok(())
     }
 
-    fn peek_opcode(&self) -> u16 {
+    fn check_memory(&self, start: usize, length: usize) -> Result<(), Error> {
+        let end = start + length;
+        if end > self.memory.len() {
+            return Err(Error::MemoryOutOfBounds { address: end - 1 });
+        }
+        Ok(())
+    }
+
+    fn peek_opcode(&self) -> Result<u16, Error> {
         let pc = self.pc as usize;
+        self.check_memory(pc, 2)?;
         let high = self.memory[pc] as u16;
         let low = self.memory[pc + 1] as u16;
 
-        (high << 8) | low
+        Ok((high << 8) | low)
     }
 
-    pub fn fetch(&mut self) -> u16 {
-        let opcode = self.peek_opcode();
+    /// Reads the opcode at the program counter and moves the counter past it.
+    ///
+    /// Opcodes are two bytes, stored big-endian.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MemoryOutOfBounds`] if the opcode is not fully inside memory.
+    pub fn fetch(&mut self) -> Result<u16, Error> {
+        let opcode = self.peek_opcode()?;
         self.pc += 2;
-        opcode
+        Ok(opcode)
     }
 
+    /// Describes the machine in text: the next instruction, the registers, the timers and the stack.
+    ///
+    /// It only looks at the machine, it never changes it, so it is safe to call between steps.
     pub fn debug_state(&self) -> String {
-        let opcode = self.peek_opcode();
+        let opcode = self.peek_opcode().unwrap_or(0);
         let registers: Vec<String> = self
             .v
             .iter()
@@ -125,18 +201,30 @@ impl Chip8 {
         )
     }
 
+    /// Runs one full CPU cycle: fetch, decode and execute.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever [`Chip8::fetch`] or [`Chip8::execute`] report.
     pub fn step(&mut self) -> Result<(), Error> {
-        let opcode = self.fetch();
+        let opcode = self.fetch()?;
         let instruction = decode(opcode);
         self.execute(instruction)
     }
 
+    /// Counts the delay and sound timers down by one.
+    ///
+    /// Call it 60 times per second, no matter how fast the CPU runs.
+    /// It also marks the start of a new frame, which `display_wait` needs.
     pub fn tick_timers(&mut self) {
         self.delay_timer = self.delay_timer.saturating_sub(1);
         self.sound_timer = self.sound_timer.saturating_sub(1);
         self.vblank = true;
     }
 
+    /// Draws the screen as text, two characters per pixel and one line per row.
+    ///
+    /// The terminal characters are taller than wide, so doubling the width keeps the picture's proportions.
     pub fn display_as_text(&self) -> String {
         let mut text = String::new();
         for row in self.display.chunks(DISPLAY_WIDTH) {
@@ -148,6 +236,12 @@ impl Chip8 {
         text
     }
 
+    /// Executes one already decoded instruction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StackOverflow`] or [`Error::StackUnderflow`] on a bad `Call`/`Return`,
+    /// and [`Error::MemoryOutOfBounds`] when an instruction touches memory past the end.
     pub fn execute(&mut self, instruction: Instruction) -> Result<(), Error> {
         match instruction {
             Instruction::ClearScreen => self.display.fill(false),
@@ -158,7 +252,7 @@ impl Chip8 {
                 self.v[x] = self.v[x].wrapping_add(nn);
             }
             Instruction::LoadI(address) => self.i = address,
-            Instruction::Draw { x, y, n } => self.draw(x, y, n),
+            Instruction::Draw { x, y, n } => self.draw(x, y, n)?,
             Instruction::Call(address) => self.call(address)?,
             Instruction::Return => self.return_from_subroutine()?,
             Instruction::SkipIfEqualByte { x, nn } => self.skip_if(self.v[x as usize] == nn),
@@ -191,9 +285,9 @@ impl Chip8 {
             Instruction::Random { x, nn } => self.v[x as usize] = self.next_random() & nn,
             Instruction::AddI(x) => self.i = self.i.wrapping_add(self.v[x as usize] as u16),
             Instruction::LoadFont(x) => self.load_font(x),
-            Instruction::Bcd(x) => self.bcd(x),
-            Instruction::StoreRegs(x) => self.store_regs(x),
-            Instruction::LoadRegs(x) => self.load_regs(x),
+            Instruction::Bcd(x) => self.bcd(x)?,
+            Instruction::StoreRegs(x) => self.store_regs(x)?,
+            Instruction::LoadRegs(x) => self.load_regs(x)?,
             Instruction::SkipIfKeyPressed(x) => self.skip_if(self.is_key_down(x)),
             Instruction::SkipIfKeyNotPressed(x) => self.skip_if(!self.is_key_down(x)),
             Instruction::WaitKey(x) => self.wait_key(x),
@@ -205,14 +299,15 @@ impl Chip8 {
         Ok(())
     }
 
-    fn draw(&mut self, x: u8, y: u8, n: u8) {
+    fn draw(&mut self, x: u8, y: u8, n: u8) -> Result<(), Error> {
         if self.quirks.display_wait {
             if !self.vblank {
                 self.pc -= 2;
-                return;
+                return Ok(());
             }
             self.vblank = false;
         }
+        self.check_memory(self.i as usize, n as usize)?;
 
         let start_x = self.v[x as usize] as usize % DISPLAY_WIDTH;
         let start_y = self.v[y as usize] as usize % DISPLAY_HEIGHT;
@@ -246,6 +341,7 @@ impl Chip8 {
                 }
             }
         }
+        Ok(())
     }
 
     fn call(&mut self, address: u16) -> Result<(), Error> {
@@ -317,26 +413,32 @@ impl Chip8 {
         self.i = FONT_START as u16 + digit * 5;
     }
 
-    fn bcd(&mut self, x: u8) {
+    fn bcd(&mut self, x: u8) -> Result<(), Error> {
         let value = self.v[x as usize];
         let start = self.i as usize;
+        self.check_memory(start, 3)?;
         self.memory[start] = value / 100;
         self.memory[start + 1] = (value / 10) % 10;
         self.memory[start + 2] = value % 10;
+        Ok(())
     }
 
-    fn store_regs(&mut self, x: u8) {
+    fn store_regs(&mut self, x: u8) -> Result<(), Error> {
         let count = x as usize + 1;
         let start = self.i as usize;
+        self.check_memory(start, count)?;
         self.memory[start..start + count].copy_from_slice(&self.v[..count]);
         self.advance_i_quirk(count);
+        Ok(())
     }
 
-    fn load_regs(&mut self, x: u8) {
+    fn load_regs(&mut self, x: u8) -> Result<(), Error> {
         let count = x as usize + 1;
         let start = self.i as usize;
+        self.check_memory(start, count)?;
         self.v[..count].copy_from_slice(&self.memory[start..start + count]);
         self.advance_i_quirk(count);
+        Ok(())
     }
 
     fn is_key_down(&self, x: u8) -> bool {
@@ -452,7 +554,7 @@ mod tests {
         let mut chip = Chip8::new();
         chip.load_rom(&[0xA2, 0xF0]).unwrap();
 
-        assert_eq!(chip.fetch(), 0xA2F0);
+        assert_eq!(chip.fetch().unwrap(), 0xA2F0);
         assert_eq!(chip.pc, 0x202);
     }
 
@@ -461,8 +563,8 @@ mod tests {
         let mut chip = Chip8::new();
         chip.load_rom(&[0xA2, 0xF0, 0x00, 0xE0]).unwrap();
 
-        assert_eq!(chip.fetch(), 0xA2F0);
-        assert_eq!(chip.fetch(), 0x00E0);
+        assert_eq!(chip.fetch().unwrap(), 0xA2F0);
+        assert_eq!(chip.fetch().unwrap(), 0x00E0);
         assert_eq!(chip.pc, 0x204);
     }
 
@@ -1210,5 +1312,53 @@ mod tests {
 
         assert!(state.contains("stack=[202]"));
         assert!(state.contains("sp=1"));
+    }
+
+    #[test]
+    fn errors_have_readable_messages() {
+        assert_eq!(
+            Error::StackOverflow.to_string(),
+            "stack overflow: more than 16 nested calls"
+        );
+        assert_eq!(
+            Error::RomTooLarge {
+                size: 5000,
+                max: 3584
+            }
+            .to_string(),
+            "the ROM has 5000 bytes but only 3584 fit in memory"
+        );
+    }
+
+    #[test]
+    fn fetch_fails_past_the_end_of_memory() {
+        let mut chip = Chip8::new();
+        chip.pc = 0xFFF;
+
+        assert_eq!(
+            chip.fetch(),
+            Err(Error::MemoryOutOfBounds { address: 0x1000 })
+        );
+    }
+
+    #[test]
+    fn draw_fails_when_the_sprite_is_outside_memory() {
+        let mut chip = Chip8::new();
+        chip.i = 0xFFE;
+
+        assert_eq!(
+            chip.execute(Instruction::Draw { x: 0, y: 1, n: 5 }),
+            Err(Error::MemoryOutOfBounds { address: 0x1002 })
+        );
+    }
+
+    #[test]
+    fn memory_instructions_fail_outside_memory() {
+        let mut chip = Chip8::new();
+        chip.i = 0xFFE;
+
+        assert!(chip.execute(Instruction::Bcd(0)).is_err());
+        assert!(chip.execute(Instruction::StoreRegs(2)).is_err());
+        assert!(chip.execute(Instruction::LoadRegs(2)).is_err());
     }
 }
