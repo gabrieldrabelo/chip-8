@@ -3,3 +3,5 @@
 /board/
 /CLAUDE.md
 /roms/
+/web/target/
+/web/pkg/

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CHIP-8</title>
+  <style>
+    body { background: #111; color: #eee; font-family: sans-serif; text-align: center; }
+    canvas { width: 768px; height: 384px; background: #000; image-rendering: pixelated; }
+    #error { color: #f66; }
+  </style>
+</head>
+<body>
+  <h1>CHIP-8</h1>
+  <p><input type="file" id="rom"></p>
+  <canvas id="screen" width="64" height="32"></canvas>
+  <p id="error"></p>
+  <script type="module">
+    import init, { Emulator } from "./pkg/chip8_web.js";
+
+    const STEPS_PER_FRAME = 12;
+    const FRAME_MS = 1000 / 60;
+    const KEYS = {
+      Digit1: 0x1, Digit2: 0x2, Digit3: 0x3, Digit4: 0xC,
+      KeyQ: 0x4, KeyW: 0x5, KeyE: 0x6, KeyR: 0xD,
+      KeyA: 0x7, KeyS: 0x8, KeyD: 0x9, KeyF: 0xE,
+      KeyZ: 0xA, KeyX: 0x0, KeyC: 0xB, KeyV: 0xF,
+    };
+
+    const screen = document.getElementById("screen");
+    const context = screen.getContext("2d");
+    const image = context.createImageData(screen.width, screen.height);
+    const errorBox = document.getElementById("error");
+
+    let emulator = null;
+    let beep = null;
+    let lastTime = performance.now();
+    let pendingFrames = 0;
+
+    await init();
+
+    function startAudio() {
+      if (beep) return;
+      const audio = new AudioContext();
+      const oscillator = audio.createOscillator();
+      beep = audio.createGain();
+      beep.gain.value = 0;
+      oscillator.frequency.value = 440;
+      oscillator.connect(beep).connect(audio.destination);
+      oscillator.start();
+    }
+
+    async function loadRom(file) {
+      const next = new Emulator();
+      try {
+        next.load_rom(new Uint8Array(await file.arrayBuffer()));
+      } catch (error) {
+        next.free();
+        throw error;
+      }
+      emulator?.free();
+      emulator = next;
+    }
+
+    function showError(error) {
+      errorBox.textContent = error.message ?? String(error);
+    }
+
+    function draw() {
+      const pixels = emulator.pixels();
+      for (let index = 0; index < pixels.length; index++) {
+        const value = pixels[index] ? 255 : 0;
+        image.data.set([value, value, value, 255], index * 4);
+      }
+      context.putImageData(image, 0, 0);
+    }
+
+    function runEmulatorFrame() {
+      for (let step = 0; step < STEPS_PER_FRAME; step++) {
+        emulator.step();
+      }
+      emulator.tick_timers();
+    }
+
+    function frame(now) {
+      pendingFrames = Math.min(pendingFrames + (now - lastTime) / FRAME_MS, 3);
+      lastTime = now;
+
+      if (emulator) {
+        try {
+          while (pendingFrames >= 1) {
+            runEmulatorFrame();
+            pendingFrames -= 1;
+          }
+          draw();
+          beep.gain.value = emulator.is_beeping() ? 0.1 : 0;
+        } catch (error) {
+          showError(error);
+          emulator.free();
+          emulator = null;
+        }
+      } else {
+        pendingFrames = 0;
+      }
+      requestAnimationFrame(frame);
+    }
+
+    function setKey(event, pressed) {
+      const key = KEYS[event.code];
+      if (key !== undefined && emulator) {
+        emulator.set_key(key, pressed);
+        event.preventDefault();
+      }
+    }
+
+    document.getElementById("rom").addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      startAudio();
+      errorBox.textContent = "";
+      loadRom(file).catch(showError);
+    });
+    addEventListener("keydown", (event) => setKey(event, true));
+    addEventListener("keyup", (event) => setKey(event, false));
+
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
